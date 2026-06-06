@@ -9,7 +9,7 @@
 [![Hindsight](https://img.shields.io/badge/Hindsight_SDK-6C63FF?style=for-the-badge)](https://hindsight.dev)
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
-> **Submitted for HackWithIndia Presents: NEXUS HYBRID — The Ultimate Virtual Hackathon Experience**
+
 
 *An AI code reviewer that actually remembers you.*
 
