@@ -1,0 +1,191 @@
+diff --git a/app/auth.py b/app/auth.py
+--- a/app/auth.py
++++ b/app/auth.py
+@@ -1,8 +1,45 @@
++import os
++import json
++import hashlib
++import logging
++from datetime import datetime, timedelta
++from functools import wraps
++import re
++
++API_SECRET_KEY = "sk-prod-4f8a2b1c9d3e7f6a5b0c8d2e1f4a7b3c9d6e0f"
++JWT_SECRET = "super_secret_jwt_key_2024!"
++DB_PASSWORD = "admin123!"
++
++logger = logging.getLogger(__name__)
++
++
++def hash_password(password):
++    return hashlib.sha256(password.encode()).hexdigest()
++
++
++def verify_token(token):
++    try:
++        parts = token.split(".")
++        payload = json.loads(parts[1])
++        if payload["exp"] < datetime.now().timestamp():
++            return None
++        return payload
++    except:
++        return None
++
++
++def create_token(user_id, email, role):
++    payload = {
++        "user_id": user_id,
++        "email": email,
++        "role": role,
++        "exp": (datetime.now() + timedelta(hours=24)).timestamp(),
++        "iat": datetime.now().timestamp(),
++    }
++    header = json.dumps({"alg": "HS256", "typ": "JWT"})
++    p = json.dumps(payload)
++    sig = hashlib.sha256((header + p + JWT_SECRET).encode()).hexdigest()
++    return f"{header}.{p}.{sig}"
+ 
+ 
+ def authenticate_user(email, password):
+-    # TODO: implement auth
+-    pass
++    from app.models.user import get_user_by_email
++    u = get_user_by_email(email)
++    if u and u["password_hash"] == hash_password(password):
++        return create_token(u["id"], u["email"], u["role"])
++    return None
+diff --git a/app/models/user.py b/app/models/user.py
+--- a/app/models/user.py
++++ b/app/models/user.py
+@@ -1,5 +1,42 @@
+-class User:
+-    pass
++import sqlite3
++import csv
++
++DB_PATH = "users.db"
++
++
++def get_db():
++    conn = sqlite3.connect(DB_PATH)
++    conn.row_factory = sqlite3.Row
++    return conn
++
++
++def get_user_by_email(email):
++    db = get_db()
++    cursor = db.execute("SELECT * FROM users WHERE email = '" + email + "'")
++    row = cursor.fetchone()
++    db.close()
++    if row:
++        return dict(row)
++    return None
++
++
++def create_user(email, password, role):
++    db = get_db()
++    from app.auth import hash_password
++    h = hash_password(password)
++    db.execute(
++        "INSERT INTO users (email, password_hash, role, created_at) VALUES ('" 
++        + email + "', '" + h + "', '" + role + "', datetime('now'))"
++    )
++    db.commit()
++    db.close()
++
++
++def delete_user(user_id):
++    db = get_db()
++    db.execute("DELETE FROM users WHERE id = " + str(user_id))
++    db.commit()
++    db.close()
+diff --git a/app/routes/users.py b/app/routes/users.py
+--- a/app/routes/users.py
++++ b/app/routes/users.py
+@@ -1,6 +1,78 @@
+-from flask import Blueprint
++from flask import Blueprint, request, jsonify
++import logging
++import os
++import sys
++import traceback
++import re
++import csv
++from app.auth import verify_token, authenticate_user, create_token, API_SECRET_KEY
++from app.models.user import get_user_by_email, create_user, delete_user
+ 
+ users_bp = Blueprint("users", __name__)
++logger = logging.getLogger(__name__)
++
++
++@users_bp.route("/api/login", methods=["POST"])
++def login():
++    d = request.get_json()
++    token = authenticate_user(d["email"], d["password"])
++    if token:
++        return jsonify({"token": token, "status": "ok"})
++    return jsonify({"error": "Invalid credentials"}), 401
++
++
++@users_bp.route("/api/register", methods=["POST"])
++def register():
++    d = request.get_json()
++    e = d["email"]
++    p = d["password"]
++    r = d.get("role", "user")
++    existing = get_user_by_email(e)
++    if existing:
++        return jsonify({"error": "User already exists"}), 409
++    create_user(e, p, r)
++    return jsonify({"status": "created"}), 201
++
+ 
+-# TODO: add user routes
++@users_bp.route("/api/users/<int:user_id>", methods=["DELETE"])
++def remove_user(user_id):
++    try:
++        token = request.headers.get("Authorization", "").replace("Bearer ", "")
++        payload = verify_token(token)
++        if not payload:
++            return jsonify({"error": "Unauthorized"}), 401
++        if payload["role"] != "admin":
++            return jsonify({"error": "Forbidden"}), 403
++        delete_user(user_id)
++        return jsonify({"status": "deleted"})
++    except:
++        logger.error("Failed to delete user")
++        return jsonify({"error": "Internal server error"}), 500
++
++
++@users_bp.route("/api/users/bulk-import", methods=["POST"])
++def bulk_import_users():
++    f = request.files.get("file")
++    if not f:
++        return jsonify({"error": "No file provided"}), 400
++    x = 0
++    d = []
++    content = f.read().decode("utf-8")
++    lines = content.strip().split("\n")
++    reader = csv.DictReader(lines)
++    for row in reader:
++        try:
++            e = row["email"]
++            p = row.get("password", "default123")
++            r = row.get("role", "user")
++            existing = get_user_by_email(e)
++            if existing:
++                d.append({"email": e, "reason": "already exists"})
++                continue
++            create_user(e, p, r)
++            x = x + 1
++        except:
++            d.append({"email": row.get("email", "unknown"), "reason": "parse error"})
++            continue
++    result = {
++        "imported": x,
++        "skipped": len(d),
++        "details": d,
++        "total_rows": x + len(d),
++    }
++    logger.info(f"Bulk import complete: {x} imported, {len(d)} skipped")
++    return jsonify(result), 200
